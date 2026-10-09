@@ -1,0 +1,11 @@
+[
+  {
+    "for": "Mum",
+    "recipe": "pad_thai",
+    "weekday": 6,
+    "hour": 9,
+    "budget": 40,
+    "chat_id": 123456789,
+    "pantry": ["fish sauce"]
+  }
+]

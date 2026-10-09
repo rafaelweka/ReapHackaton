@@ -1,0 +1,9 @@
+{
+  "name": "Pad Thai",
+  "ingredients": [
+    { "name": "rice noodles 400g", "quantity": 1, "max_price": 8 },
+    { "name": "tamarind paste", "quantity": 1, "max_price": 8 },
+    { "name": "fish sauce", "quantity": 1, "max_price": 8 },
+    { "name": "roasted peanuts", "quantity": 1, "max_price": 8 }
+  ]
+}
