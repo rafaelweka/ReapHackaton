@@ -87,11 +87,57 @@ function Countdown({ expiresAt }: { expiresAt: string }) {
   return <span>{left}</span>;
 }
 
+function Icon({
+  d,
+  size = 16,
+  stroke = "currentColor",
+}: {
+  d: string;
+  size?: number;
+  stroke?: string;
+}) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={stroke} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d={d} />
+    </svg>
+  );
+}
+
+function Mascot({ size = 42 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 40 40" aria-hidden className="rtb-wobble" style={{ display: "block" }}>
+      <circle cx="20" cy="20" r="20" fill="#2e503d" />
+      <path d="M11 24a5 5 0 0 1-1.2-9.8A6.5 6.5 0 0 1 20 9a6.5 6.5 0 0 1 10.2 5.2A5 5 0 0 1 29 24z" fill="#ffffff" />
+      <path d="M16 23v-5M20 23v-7M24 23v-5" stroke="#d3e2d6" strokeWidth="1.3" strokeLinecap="round" fill="none" />
+      <rect x="11" y="23" width="18" height="8" rx="2.5" fill="#ffffff" />
+      <circle className="rtb-eye" cx="16.5" cy="27" r="1.2" fill="#2e503d" />
+      <circle className="rtb-eye" cx="23.5" cy="27" r="1.2" fill="#2e503d" />
+      <path d="M18.6 28.4q1.4 1.3 2.8 0" stroke="#2e503d" strokeWidth="1.1" strokeLinecap="round" fill="none" />
+      <circle cx="14.3" cy="28.6" r="1.2" fill="#f4b9a7" opacity="0.85" />
+      <circle cx="25.7" cy="28.6" r="1.2" fill="#f4b9a7" opacity="0.85" />
+    </svg>
+  );
+}
+
+const I = {
+  refresh: "M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5",
+  wallet: "M3 7h15a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V7zM3 7l12-3v3M17 14h.01",
+  truck: "M1 6h13v10H1zM14 10h4l4 3v3h-8zM5 19a2 2 0 1 0 4 0 2 2 0 1 0-4 0M16 19a2 2 0 1 0 4 0 2 2 0 1 0-4 0",
+  tag: "M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8zM7 7h.01",
+  camera: "M3 8a2 2 0 0 1 2-2h2l1.5-2h7L17 6h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
+  hat: "M7 20h10v-4H7zM6.5 16a4 4 0 0 1-.5-7.9A5 5 0 0 1 12 4a5 5 0 0 1 6 4.1 4 4 0 0 1-.5 7.9",
+  check: "M20 6 9 17l-5-5",
+  send: "M22 2 11 13M22 2l-7 20-4-9-9-4z",
+  lock: "M7 11V8a5 5 0 0 1 10 0v3M6 11h12v10H6z",
+};
+
+const GREETING =
+  "What are we cooking? Scan a recipe, paste it, or just name the dish. I will work out what is missing and shop for it within your rules.";
+
 export default function HomePage() {
   const [step, setStep] = useState<Step>("input");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [text, setText] = useState("");
   const [recipe, setRecipe] = useState<Recipe | null>(null);
   const [budget, setBudget] = useState("25");
   const [latestDate, setLatestDate] = useState("");
@@ -106,7 +152,12 @@ export default function HomePage() {
   const [resumeAfterCard, setResumeAfterCard] = useState(false);
   const [auditLog, setAuditLog] = useState<AuditEvent[]>([]);
   const checkoutStarted = useRef(false);
+  const photoRef = useRef<HTMLInputElement>(null);
+  const logRef = useRef<HTMLDivElement>(null);
   const [now, setNow] = useState(Date.now());
+  const [draft, setDraft] = useState("");
+  const [lastUser, setLastUser] = useState("");
+  const [ask, setAsk] = useState<"budget" | "delivery" | "brand" | null>(null);
 
   function logClient(
     kind: string,
@@ -180,6 +231,12 @@ export default function HomePage() {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    const el = logRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [step, busy, plan, events.length, lastUser, error, checkout]);
 
   useEffect(() => {
     loadAudit();
@@ -582,365 +639,455 @@ export default function HomePage() {
   const suggested = recipe?.ingredients.some((i) => i.suggested);
   const cardReady = enrollment?.status === "ACTIVE";
   const quoteTotal = plan?.quote ? formatSgd(plan.quote.finalAmount.amount) : "";
+  const budgetAmt = Number(budget) || 0;
+  const spent = plan?.quote?.finalAmount.amount ?? 0;
+  const meterPct = budgetAmt > 0 ? Math.min(100, (spent / budgetAmt) * 100) : 0;
+  const overBudget = budgetAmt > 0 && spent > budgetAmt;
+  const ship = plan?.quote?.shippingOptions.find((o) => o.selected);
 
-  let nextClick = "Click: Use sample recipe";
-  if (busy) nextClick = "Wait — working…";
-  else if (step === "pantry") nextClick = "Click: Next — set budget";
-  else if (step === "guardrails") nextClick = "Click: Shop for missing items";
-  else if (step === "plan" && expired) nextClick = "Click: Refresh grocery price (quote expired)";
-  else if (step === "plan" && plan && !plan.canApprove) nextClick = "Budget failed — go back and raise the cap, then shop again";
-  else if (step === "plan" && plan?.canApprove && !cardReady)
-    nextClick = cardPageUrl
-      ? "Click: Continue Reap card page (finish OTP / phone passkey). S$0 on that page is normal."
-      : "Click: Open Reap card page (it may show S$0 — that only saves the card)";
-  else if (step === "plan" && plan?.canApprove && cardReady)
-    nextClick = `Click: Pay grocery total ${quoteTotal}`;
-  else if (step === "confirm") nextClick = "Done — or click Start a new order";
+  function newOrder() {
+    resetLocalCard();
+    sessionStorage.removeItem(STORE_KEY);
+    window.location.href = "/";
+  }
+
+  function markHave(id: string) {
+    if (!recipe) return;
+    setRecipe({
+      ...recipe,
+      ingredients: recipe.ingredients.map((i) => (i.id === id ? { ...i, have: !i.have } : i)),
+    });
+  }
+
+  function applyHaveFromText(raw: string) {
+    if (!recipe) return;
+    const lower = raw.toLowerCase();
+    setRecipe({
+      ...recipe,
+      ingredients: recipe.ingredients.map((ing) => {
+        const hit = ing.name
+          .toLowerCase()
+          .split(/\s+/)
+          .some((w) => w.length > 3 && lower.includes(w));
+        return hit ? { ...ing, have: true } : ing;
+      }),
+    });
+  }
+
+  async function handleSend(raw?: string) {
+    const t = (raw ?? draft).trim();
+    if (!t || busy) return;
+    setDraft("");
+    setLastUser(t);
+    if (step === "input") {
+      await parse({ kind: "text", text: t });
+      return;
+    }
+    if (step === "pantry") {
+      if (/have|got|already/i.test(t)) applyHaveFromText(t);
+      else setStep("guardrails");
+      return;
+    }
+    const money = t.replace(/,/g, "").match(/(\d+(?:\.\d+)?)/);
+    if (ask === "budget" || /budget|under|sgd|\$/i.test(t)) {
+      if (money) setBudget(money[1]);
+      setAsk(null);
+      if (step === "input" && !recipe) return;
+      if (step === "pantry") setStep("guardrails");
+      return;
+    }
+    if (ask === "delivery" || /\bby\b|deliver/i.test(t)) {
+      const iso = t.match(/\d{4}-\d{2}-\d{2}/);
+      if (iso) setLatestDate(iso[0]);
+      setAsk(null);
+      return;
+    }
+    if (ask === "brand" || /avoid|prefer|brand/i.test(t)) {
+      const avoid = t.match(/avoid\s+(.+)/i);
+      const pref = t.match(/prefer\s+(.+)/i);
+      if (avoid) setBlocked(avoid[1].trim());
+      if (pref) setPreferred(pref[1].trim());
+      setAsk(null);
+      return;
+    }
+    if (step === "guardrails") {
+      if (money) setBudget(money[1]);
+      void runPlan();
+    }
+  }
+
+  const chips: { label: string; ghost?: boolean; onClick: () => void; icon?: string }[] = [];
+  if (step === "input") {
+    chips.push(
+      { label: "Use sample recipe", icon: I.hat, onClick: () => { setLastUser("Use the sample recipe"); void parse({ kind: "sample" }); } },
+      { label: "Scan a recipe", icon: I.camera, ghost: true, onClick: () => photoRef.current?.click() },
+    );
+  } else if (step === "pantry") {
+    chips.push({ label: "Looks good — set budget", onClick: () => setStep("guardrails") });
+  } else if (step === "guardrails") {
+    chips.push(
+      { label: "Shop missing items", onClick: () => void runPlan() },
+      { label: "Under S$25", ghost: true, onClick: () => { setBudget("25"); setLastUser("under $25"); } },
+      { label: "Under S$40", ghost: true, onClick: () => { setBudget("40"); setLastUser("under $40"); } },
+    );
+  } else if (step === "plan" && plan) {
+    if (expired) chips.push({ label: "Refresh price", icon: I.refresh, onClick: () => void refresh() });
+    if (!plan.canApprove && latestDate) {
+      chips.push({
+        label: "Relax delivery date",
+        ghost: true,
+        onClick: () => {
+          setLatestDate("");
+          void runPlan({ ...guardrails, delivery: { window: timeWindow === "any" ? undefined : timeWindow } });
+        },
+      });
+    }
+    if (plan.canApprove && !expired && plan.quote) {
+      if (cardReady) chips.push({ label: `Pay ${quoteTotal}`, onClick: () => void approve() });
+      else if (cardPageUrl) chips.push({ label: "Continue card page", onClick: () => { window.location.href = cardPageUrl; } });
+      else chips.push({ label: "Add sandbox card", onClick: () => void approve() });
+    }
+  } else if (step === "confirm") {
+    chips.push({ label: "New recipe", icon: I.refresh, onClick: newOrder });
+  }
+
+  let agentText = GREETING;
+  if (step === "pantry") {
+    agentText = suggested
+      ? "I guessed the ingredients from the dish name. Tap a row if you already have it."
+      : "Tick what is already in the pantry. Unticked items go in the basket.";
+  } else if (step === "guardrails") {
+    agentText = ask === "budget"
+      ? "What is the most you want to spend, including delivery? Try “under $25”."
+      : ask === "delivery"
+        ? "When do you need it by? Pick a date or type one, like 2026-10-14."
+        : ask === "brand"
+          ? "Which brands should I prefer or avoid? Try “avoid XYZ”."
+          : `I need ${needCount(recipe)} items. Set a budget, then I will shop one Singapore merchant.`;
+  } else if (step === "plan" && !plan) {
+    agentText = "Shopping now. I will lock one merchant and hold the price.";
+  } else if (step === "plan" && plan) {
+    agentText = plan.message || `Locked ${plan.merchant.label}. Approve on Reap when you are ready — the agent never sees your card.`;
+  } else if (step === "confirm") {
+    agentText = "Approved. You are ready to cook.";
+  }
+
+  const placeholder =
+    step === "input"
+      ? "Type a dish or paste a recipe…"
+      : ask === "budget"
+        ? "e.g. under $25"
+        : "Type a reply or a rule…";
+
 
   return (
-    <main>
-      <h1>Snap-a-Recipe Cart</h1>
-      <p>
-        <strong>Next click: {nextClick}</strong>
-      </p>
-      <p className="muted">
-        Card page (S$0) stores the card. Grocery total is charged only after the card is ACTIVE.
-        Test card: 4622 9431 2313 7797, CVC 640, expiry 12/27. OTP 456789 if asked. Prefer
-        iPhone Safari if the Mac passkey gets stuck.
-      </p>
-      {error ? <p role="alert">{error}</p> : null}
-      {busy ? <p>Working…</p> : null}
-      <p>
-        <button
-          type="button"
-          onClick={() => {
-            resetLocalCard();
-            sessionStorage.removeItem(STORE_KEY);
-            window.location.href = "/";
-          }}
-        >
-          Start a new order
+    <main className="phone">
+      <input
+        ref={photoRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        hidden
+        onChange={(e) => {
+          const file = e.target.files?.[0] ?? null;
+          if (file) {
+            setLastUser("Here's a recipe photo");
+            void onPhoto(file);
+          }
+        }}
+      />
+
+      <header className="phone-head">
+        <div className="phone-brand">
+          <Mascot />
+          <div>
+            <div className="phone-title">Recipe to basket</div>
+            <div className="phone-sub">REAP sandbox demo</div>
+          </div>
+        </div>
+        <button type="button" className="ghost" onClick={newOrder}>
+          <Icon d={I.refresh} stroke="#606c62" />
+          <span>New recipe</span>
         </button>
-        <button
-          type="button"
-          onClick={() => {
-            resetLocalCard();
-            setError("Card session cleared. Next click is Open Reap card page after you have a quote.");
-          }}
-        >
-          Forget saved card (start enrollment over)
+      </header>
+
+      <div className="rules" role="group" aria-label="Your rules">
+        <button type="button" className={`rule${ask === "budget" || budgetAmt > 0 ? " on" : ""}`} onClick={() => setAsk("budget")}>
+          <Icon d={I.wallet} stroke="#2e503d" />
+          <span>
+            <span className="rule-k">Budget</span>
+            <span className="rule-v">{budgetAmt > 0 ? `S$${budget}` : "Not set"}</span>
+          </span>
         </button>
-      </p>
+        <button type="button" className={`rule${ask === "delivery" || latestDate ? " on" : ""}`} onClick={() => setAsk("delivery")}>
+          <Icon d={I.truck} stroke="#2e503d" />
+          <span>
+            <span className="rule-k">Delivery</span>
+            <span className="rule-v">{latestDate || timeWindow !== "any" ? latestDate || timeWindow : "Any day"}</span>
+          </span>
+        </button>
+        <button type="button" className={`rule${ask === "brand" || preferred || blocked ? " on" : ""}`} onClick={() => setAsk("brand")}>
+          <Icon d={I.tag} stroke="#2e503d" />
+          <span>
+            <span className="rule-k">Brands</span>
+            <span className="rule-v">{preferred || blocked ? [preferred && `prefer ${preferred}`, blocked && `avoid ${blocked}`].filter(Boolean).join(" · ") : "Any"}</span>
+          </span>
+        </button>
+      </div>
 
-      {step === "input" ? (
-        <fieldset>
-          <legend>1. Snap or type</legend>
-          <p>
-            <strong>Click “Use sample recipe (skip typing)” unless you have your own text.</strong>
-          </p>
-          <label>
-            Recipe photo
-            <input
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={(e) => void onPhoto(e.target.files?.[0] ?? null)}
-              disabled={busy}
-            />
-          </label>
-          <label>
-            Recipe text, dish name, or ingredient list
-            <textarea
-              rows={6}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder='e.g. "chicken rice for 2" or paste a recipe'
-              style={{ width: "100%" }}
-            />
-          </label>
-          <button type="button" disabled={busy || !text.trim()} onClick={() => void parse({ kind: "text", text })}>
-            Parse this recipe text
-          </button>
-          <button type="button" disabled={busy} onClick={() => void parse({ kind: "sample" })}>
-            Use sample recipe (skip typing)
-          </button>
-        </fieldset>
-      ) : null}
-
-      {recipe && step !== "input" && step !== "confirm" ? (
-        <p>
-          <strong>{recipe.title}</strong> · {recipe.servings} servings · {needCount(recipe)} to buy
-          {suggested ? " · suggested ingredients from dish name" : null}
-        </p>
-      ) : null}
-
-      {step === "pantry" && recipe ? (
-        <fieldset>
-          <legend>2. Pantry check</legend>
-          <p className="muted">Ticked = already have. Untick anything you still need.</p>
-          {recipe.ingredients.map((ing) => (
-            <label key={ing.id}>
-              <input
-                type="checkbox"
-                checked={ing.have}
-                onChange={() =>
-                  setRecipe({
-                    ...recipe,
-                    ingredients: recipe.ingredients.map((i) =>
-                      i.id === ing.id ? { ...i, have: !i.have } : i,
-                    ),
-                  })
-                }
-              />{" "}
-              {ing.name} ({ing.quantity}){ing.optional ? " — optional" : ""}
-              {ing.have ? " · have" : " · need"}
-            </label>
-          ))}
-          <p>Need: {needCount(recipe)}</p>
-          <button type="button" onClick={() => setStep("input")}>
-            Back to recipe input
-          </button>
-          <button type="button" onClick={() => setStep("guardrails")}>
-            Next — set budget
-          </button>
-        </fieldset>
-      ) : null}
-
-      {step === "guardrails" && recipe ? (
-        <fieldset>
-          <legend>3. Budget and guardrails</legend>
-          <p>Items on the need list: {needCount(recipe)}</p>
-          <label>
-            Budget cap (SGD, required)
-            <input
-              type="number"
-              min={0.01}
-              step={0.01}
-              value={budget}
-              onChange={(e) => setBudget(e.target.value)}
-            />
-          </label>
-          <label>
-            Latest delivery date (optional)
-            <input type="date" value={latestDate} onChange={(e) => setLatestDate(e.target.value)} />
-          </label>
-          <label>
-            Time window (not guaranteed on Reap)
-            <select value={timeWindow} onChange={(e) => setTimeWindow(e.target.value as DeliveryWindow)}>
-              <option value="any">any</option>
-              <option value="morning">morning</option>
-              <option value="afternoon">afternoon</option>
-              <option value="evening">evening</option>
-            </select>
-          </label>
-          <label>
-            Preferred brands (comma-separated)
-            <input value={preferred} onChange={(e) => setPreferred(e.target.value)} />
-          </label>
-          <label>
-            Blocked brands (comma-separated)
-            <input value={blocked} onChange={(e) => setBlocked(e.target.value)} />
-          </label>
-          <button type="button" onClick={() => setStep("pantry")}>
-            Back to pantry
-          </button>
-          <button type="button" disabled={busy} onClick={() => void runPlan()}>
-            Shop for missing items
-          </button>
-        </fieldset>
-      ) : null}
-
-      {step === "plan" ? (
-        <section>
-          <h2>4–5. Agent shops and price lock</h2>
-          <h3>Activity log</h3>
-          {events.length === 0 ? <p className="muted">Waiting for the agent…</p> : null}
-          <ol>
-            {events.map((e, i) => (
-              <li key={`${e.ts}-${i}`}>
-                {new Date(e.ts).toLocaleTimeString()} [{e.kind}] {e.message}
-              </li>
-            ))}
-          </ol>
-
-          {plan ? (
-            <>
-              <h3>Merchant lock</h3>
-              <p>
-                {plan.merchant.label} ({plan.merchant.hits} hits).{" "}
-                {plan.scores.map((s) => `${s.label} ${s.hits}`).join(" · ")}
-              </p>
-              <h3>Cart</h3>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ingredient</th>
-                    <th>Product</th>
-                    <th>Price</th>
-                    <th>Status</th>
-                    <th>Why</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {plan.lines.map((line) => (
-                    <tr key={line.ingredientId}>
-                      <td>{line.ingredientName}</td>
-                      <td>{line.candidate.name}</td>
-                      <td>{formatSgd(line.candidate.price.amount)}</td>
-                      <td>{line.status}</td>
-                      <td>{line.reason}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {plan.quote ? (
-                <>
-                  <h3>Quote</h3>
-                  <p>Subtotal {formatSgd(plan.quote.itemsSubtotal.amount)}</p>
-                  <p>Shipping {formatSgd(plan.quote.shipping.amount)}</p>
-                  <p>Tax {formatSgd(plan.quote.tax.amount)}</p>
-                  <p>
-                    <strong>Final {formatSgd(plan.quote.finalAmount.amount)}</strong> vs budget{" "}
-                    {formatSgd(Number(budget) || 0)}
-                  </p>
-                  <p>
-                    Price lock: <Countdown expiresAt={plan.quote.expiresAt} />{" "}
-                    <button type="button" disabled={busy} onClick={() => void refresh()}>
-                      Refresh grocery price
-                    </button>
-                  </p>
-                  <p>
-                    Shipping options:{" "}
-                    {plan.quote.shippingOptions
-                      .map(
-                        (o) =>
-                          `${o.selected ? "*" : ""}${o.name} ${formatSgd(o.price.amount)} est ${o.estimatedDelivery?.latest ?? "n/a"} (${o.estimatedDelivery?.source})`,
-                      )
-                      .join(" · ")}
-                  </p>
-                </>
-              ) : null}
-              <h3>Guardrails</h3>
-              <ul>
-                {plan.guardrails.map((g) => (
-                  <li key={g.id}>
-                    {g.ok ? "pass" : "fail"} — {g.label}: {g.detail}
-                  </li>
-                ))}
-              </ul>
-              {plan.message ? <p>{plan.message}</p> : null}
-              {!plan.canApprove && latestDate ? (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => {
-                    setLatestDate("");
-                    void runPlan({
-                      ...guardrails,
-                      delivery: { window: timeWindow === "any" ? undefined : timeWindow },
-                    });
-                  }}
-                >
-                  Relax delivery date and re-shop
-                </button>
-              ) : null}
-              <button type="button" onClick={() => setStep("guardrails")}>
-                Back to budget
-              </button>
-              {enrollment ? (
-                <p>
-                  <strong>
-                    Card status: {enrollment.status}
-                    {enrollment.last4 ? ` · Visa •••• ${enrollment.last4}` : ""}
-                  </strong>
-                  {cardReady
-                    ? " — this is the stored Reap card. Pay the grocery total next."
-                    : enrollment.expiresAt
-                      ? ` — hosted step still open until ${enrollment.expiresAt}. Redirect back here is not proof of ACTIVE.`
-                      : " — card is not ready yet."}
-                </p>
-              ) : (
-                <p>
-                  <strong>Card status: checking Reap…</strong> If a Visa is already ACTIVE on this
-                  owner, Pay will show without opening Prava again.
-                </p>
-              )}
-              {!plan.canApprove || expired || !plan.quote ? (
-                <p className="muted">
-                  The pay buttons stay hidden until the quote is valid and under budget.
-                </p>
-              ) : cardReady ? (
-                <p>
-                  <button type="button" disabled={busy} onClick={() => void approve()}>
-                    {`Pay grocery total ${quoteTotal} now`}
-                  </button>
-                </p>
-              ) : cardPageUrl ? (
-                <p>
-                  <button type="button" onClick={() => { window.location.href = cardPageUrl; }}>
-                    Continue Reap card page (finish OTP or phone passkey — S$0 is OK)
-                  </button>
-                </p>
-              ) : (
-                <p>
-                  <button type="button" disabled={busy} onClick={() => void approve()}>
-                    Open Reap card page (shows S$0 — that only saves the card)
-                  </button>
-                </p>
-              )}
-            </>
+      <div className="log" ref={logRef} role="log" aria-live="polite" aria-label="Conversation">
+        <div className="log-inner">
+          {step === "input" ? (
+            <div className="hero">
+              <div className="hero-art">
+                <div className="rtb-float">
+                  <Mascot size={96} />
+                </div>
+                <svg className="rtb-twinkle twinkle a" width="18" height="18" viewBox="0 0 24 24" aria-hidden>
+                  <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" fill="#f2c14e" />
+                </svg>
+                <svg className="rtb-twinkle twinkle b" width="14" height="14" viewBox="0 0 24 24" aria-hidden>
+                  <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" fill="#f08a6b" />
+                </svg>
+              </div>
+              <div className="hero-shadow rtb-shadow" />
+            </div>
           ) : null}
-        </section>
-      ) : null}
 
-      {step === "confirm" ? (
-        <section>
-          <h2>6. Ready to cook</h2>
-          {recipe ? <p>{recipe.title}</p> : null}
-          {checkout ? (
-            <>
-              <p>Status: {checkout.status}</p>
-              <p>Order ID: {checkout.orderId ?? "(pending)"}</p>
-              <p>
-                Amount charged:{" "}
-                {checkout.finalAmount ? formatSgd(checkout.finalAmount.amount) : "(pending)"}
-              </p>
-            </>
-          ) : (
-            <p>Waiting for Reap checkout…</p>
-          )}
-          <button
-            type="button"
-            onClick={() => {
-              resetLocalCard();
-              sessionStorage.removeItem(STORE_KEY);
-              window.location.href = "/";
+          <div className="row">
+            <div className="rtb-hop">
+              <Mascot size={30} />
+            </div>
+            <div className="bubble">{agentText}</div>
+          </div>
+
+          {lastUser ? <div className="bubble user">{lastUser}</div> : null}
+
+          {error ? <p className="alert" role="alert">{error}</p> : null}
+
+          {step === "pantry" && recipe ? (
+            <div className="card">
+              <div className="card-head">
+                <div className="card-title">
+                  <Icon d={I.hat} stroke="#2e503d" />
+                  <span>{recipe.title}</span>
+                </div>
+                <div className="ing-meta">{recipe.servings} servings · {needCount(recipe)} to buy</div>
+              </div>
+              {recipe.ingredients.map((ing) => (
+                <button type="button" className="ing" key={ing.id} onClick={() => markHave(ing.id)}>
+                  <span>
+                    <span className="ing-name">{ing.name}</span>
+                    <span className="ing-meta">{ing.quantity}{ing.optional ? " · optional" : ""}</span>
+                  </span>
+                  <span className={`ing-tag ${ing.have ? "have" : "need"}`}>
+                    {ing.have ? "in pantry" : "need"}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {step === "guardrails" ? (
+            <div className="card">
+              <div className="card-head">
+                <div className="card-title">Your rules</div>
+                <div className="ing-meta">{recipe ? `${needCount(recipe)} to buy` : ""}</div>
+              </div>
+              <label className="ing">
+                <span>
+                  <span className="ing-name">Budget cap (SGD)</span>
+                  <span className="ing-meta">Required before shopping</span>
+                </span>
+                <input type="number" min={0.01} step={0.01} value={budget} onChange={(e) => setBudget(e.target.value)} style={{ width: 88, height: 36, borderRadius: 10, border: "1px solid #cfd9d0", padding: "0 8px" }} />
+              </label>
+              <label className="ing">
+                <span>
+                  <span className="ing-name">Latest delivery</span>
+                  <span className="ing-meta">Optional</span>
+                </span>
+                <input type="date" value={latestDate} onChange={(e) => setLatestDate(e.target.value)} style={{ height: 36, borderRadius: 10, border: "1px solid #cfd9d0", padding: "0 8px" }} />
+              </label>
+            </div>
+          ) : null}
+
+          {step === "plan" ? (
+            <div className="card">
+              <div className="card-head">
+                <div className="card-title">
+                  <div className="rtb-wobble"><Mascot size={28} /></div>
+                  <span>Shopping{plan ? ` at ${plan.merchant.label}` : ""}</span>
+                </div>
+                <div className="ing-meta">{plan ? `${plan.merchant.hits} hits` : "live catalog"}</div>
+              </div>
+              {events.slice(-6).map((e, i) => (
+                <div className="shop-step" key={`${e.ts}-${i}`}>
+                  <Icon d={I.check} size={14} stroke="#2e503d" />
+                  <span>{e.message.length > 88 ? `${e.message.slice(0, 85)}…` : e.message}</span>
+                </div>
+              ))}
+              {busy && events.length === 0 ? (
+                <div className="shop-step"><span>Waiting for the agent…</span></div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {step === "plan" && plan ? (
+            <div className="card">
+              <div className="card-head">
+                <div className="card-title">Your basket</div>
+                {plan.quote ? (
+                  <div className="ing-meta" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <Icon d={I.lock} size={14} stroke="#606c62" />
+                    Price held <Countdown expiresAt={plan.quote.expiresAt} />
+                  </div>
+                ) : null}
+              </div>
+              {plan.lines.map((line) => (
+                <div className="line" key={line.ingredientId}>
+                  <div>
+                    <div className="ing-name">{line.candidate.name}</div>
+                    <div className="ing-meta">{line.ingredientName} · {line.status}</div>
+                  </div>
+                  <div style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{formatSgd(line.candidate.price.amount)}</div>
+                </div>
+              ))}
+              {plan.quote ? (
+                <div className="totals">
+                  <div><span>Items</span><span>{formatSgd(plan.quote.itemsSubtotal.amount)}</span></div>
+                  <div><span>{ship?.name ?? "Shipping"}</span><span>{formatSgd(plan.quote.shipping.amount)}</span></div>
+                  <div><span>Tax</span><span>{formatSgd(plan.quote.tax.amount)}</span></div>
+                  <div className="grand"><span>Total</span><span>{formatSgd(plan.quote.finalAmount.amount)}</span></div>
+                </div>
+              ) : null}
+              {budgetAmt > 0 && plan.quote ? (
+                <div style={{ padding: "4px 0 10px" }}>
+                  <div className="meter">
+                    <span style={{ width: `${meterPct}%`, background: overBudget ? "#8f3a2a" : "#2e503d" }} />
+                  </div>
+                  <div className="ing-meta" style={{ marginTop: 4 }}>
+                    {overBudget ? "Over budget" : `${formatSgd(spent)} of ${formatSgd(budgetAmt)}`}
+                  </div>
+                </div>
+              ) : null}
+              <div style={{ paddingTop: 8, borderTop: "1px solid #e8eee8" }}>
+                <div style={{ fontSize: 11, letterSpacing: "0.6px", textTransform: "uppercase", color: "#606c62", paddingBottom: 4 }}>Rule checks</div>
+                {plan.guardrails.map((g) => (
+                  <div className="check" key={g.id}>
+                    <Icon d={g.ok ? I.check : "M18 6 6 18M6 6l12 12"} size={14} stroke={g.ok ? "#2e503d" : "#8f3a2a"} />
+                    <div>
+                      <span style={{ fontWeight: 600 }}>{g.label}</span>
+                      <span style={{ color: "#606c62" }}> · {g.detail}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {enrollment?.last4 ? (
+                <div className="note"><span style={{ fontWeight: 600, color: "#24372c" }}>Card:</span> Visa •••• {enrollment.last4} · {enrollment.status}</div>
+              ) : (
+                <div className="note"><span style={{ fontWeight: 600, color: "#24372c" }}>Card:</span> {enrollment?.status ?? "none stored yet"}</div>
+              )}
+              {plan.canApprove && plan.quote && !expired ? (
+                <button type="button" className="primary" disabled={busy} onClick={() => void approve()}>
+                  {cardReady ? `Approve ${quoteTotal}` : cardPageUrl ? "Continue Reap card page" : "Add sandbox card (S$0 is OK)"}
+                </button>
+              ) : (
+                <button type="button" className="primary" disabled>
+                  {expired ? "Price lock expired" : "Cannot approve yet"}
+                </button>
+              )}
+              <div className="fine">
+                <Icon d={I.lock} size={12} stroke="#606c62" />
+                <span>You approve on REAP&apos;s page. The agent never sees your card.</span>
+              </div>
+            </div>
+          ) : null}
+
+          {step === "confirm" ? (
+            <div className="card receipt">
+              <div className="card-head">
+                <div className="card-title">
+                  <div className="rtb-hop"><Mascot size={28} /></div>
+                  <span>
+                    <div style={{ fontWeight: 700 }}>Approved</div>
+                    <div className="ing-meta">Order {checkout?.orderId ?? checkout?.id ?? "pending"}</div>
+                  </span>
+                </div>
+              </div>
+              {recipe ? <div className="ing-meta" style={{ paddingBottom: 6 }}>{recipe.title}</div> : null}
+              {plan?.lines.filter((l) => l.status === "selected").map((l) => (
+                <div className="line" key={l.ingredientId} style={{ borderColor: "#d3e0d3", fontSize: 13 }}>
+                  <span>{l.candidate.name}</span>
+                  <span style={{ fontVariantNumeric: "tabular-nums" }}>{formatSgd(l.candidate.price.amount)}</span>
+                </div>
+              ))}
+              <div className="line" style={{ borderColor: "#d3e0d3", fontWeight: 600 }}>
+                <span>Total charged</span>
+                <span>{checkout?.finalAmount ? formatSgd(checkout.finalAmount.amount) : quoteTotal || "pending"}</span>
+              </div>
+              <div className="ing-meta">{checkout?.status ?? "Waiting for Reap checkout…"}</div>
+              {enrollment?.last4 ? <div className="ing-meta">Visa •••• {enrollment.last4}</div> : null}
+            </div>
+          ) : null}
+
+          {busy ? (
+            <div className="row">
+              <div className="rtb-hop"><Mascot size={30} /></div>
+              <div className="typing" role="status" aria-label="The assistant is typing">
+                <span className="rtb-dot" />
+                <span className="rtb-dot" style={{ animationDelay: "0.15s" }} />
+                <span className="rtb-dot" style={{ animationDelay: "0.3s" }} />
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="composer">
+        <div className="chips" role="group" aria-label="Quick replies">
+          {chips.map((c) => (
+            <button key={c.label} type="button" className={`chip${c.ghost ? " ghost" : ""}`} disabled={busy} onClick={c.onClick}>
+              {c.icon ? <Icon d={c.icon} size={16} stroke="#2e503d" /> : null}
+              <span>{c.label}</span>
+            </button>
+          ))}
+        </div>
+        <div className="send-row">
+          <input
+            type="text"
+            value={draft}
+            placeholder={placeholder}
+            aria-label="Message"
+            autoComplete="off"
+            disabled={busy}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void handleSend();
+              }
             }}
-          >
-            Start a new order
+          />
+          <button type="button" className="send-btn" aria-label="Send" disabled={busy || !draft.trim()} onClick={() => void handleSend()}>
+            <Icon d={I.send} size={18} stroke="#ffffff" />
           </button>
-        </section>
-      ) : null}
-
-      <section>
-        <h3>Audit log</h3>
-        <p className="muted">Server Reap calls and client enrollment steps. No card numbers or API keys.</p>
-        {auditLog.length === 0 ? <p className="muted">No events yet.</p> : null}
-        <ol>
-          {auditLog
-            .slice()
-            .reverse()
-            .slice(0, 30)
-            .map((row, i) => (
-              <li key={`${row.ts}-${i}`}>
-                {new Date(row.ts).toLocaleTimeString()} [{row.source}/{row.kind}] {row.message}
-                {row.enrollmentStatus ? ` · enroll ${row.enrollmentStatus}` : ""}
-                {row.last4 ? ` · last4 ${row.last4}` : ""}
-                {row.errorCode ? ` · ${row.errorCode}` : ""}
-              </li>
-            ))}
-        </ol>
-      </section>
+        </div>
+        <div className="foot">
+          REAP sandbox · you approve on Reap&apos;s page · the agent never sees your card
+          <details className="audit">
+            <summary>Audit log</summary>
+            {auditLog.length === 0 ? <p>No events yet.</p> : null}
+            <ol>
+              {auditLog.slice().reverse().slice(0, 20).map((row, i) => (
+                <li key={`${row.ts}-${i}`}>
+                  {new Date(row.ts).toLocaleTimeString()} [{row.source}/{row.kind}] {row.message}
+                  {row.enrollmentStatus ? ` · ${row.enrollmentStatus}` : ""}
+                </li>
+              ))}
+            </ol>
+          </details>
+        </div>
+      </div>
     </main>
   );
 }
