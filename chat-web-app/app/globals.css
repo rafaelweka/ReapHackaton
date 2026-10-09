@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+html {
+  color-scheme: light;
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  margin: 1rem;
+  line-height: 1.4;
+  background: #fff;
+  color: #111;
+}
+
+table {
+  border-collapse: collapse;
+}
+
+td,
+th {
+  border: 1px solid #ccc;
+  padding: 4px 8px;
+  text-align: left;
+}
+
+fieldset {
+  margin: 1rem 0;
+  padding: 0.75rem;
+}
+
+label {
+  display: block;
+  margin: 0.4rem 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  margin-right: 0.4rem;
+  margin-top: 0.4rem;
+}
+
+.muted {
+  color: #444;
+  font-size: 0.9rem;
+}

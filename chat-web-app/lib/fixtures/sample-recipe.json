@@ -1,0 +1,69 @@
+{
+  "title": "Ginger steamed fish with jasmine rice",
+  "servings": 2,
+  "ingredients": [
+    {
+      "id": "ing-seabass",
+      "name": "sea bass fillet",
+      "quantity": "2 pieces",
+      "optional": false,
+      "have": false
+    },
+    {
+      "id": "ing-rice",
+      "name": "jasmine rice",
+      "quantity": "1 cup",
+      "optional": false,
+      "have": false
+    },
+    {
+      "id": "ing-ginger",
+      "name": "fresh ginger",
+      "quantity": "40 g",
+      "optional": false,
+      "have": false
+    },
+    {
+      "id": "ing-garlic",
+      "name": "garlic",
+      "quantity": "3 cloves",
+      "optional": false,
+      "have": false
+    },
+    {
+      "id": "ing-soy",
+      "name": "light soy sauce",
+      "quantity": "2 tbsp",
+      "optional": false,
+      "have": false
+    },
+    {
+      "id": "ing-spring",
+      "name": "spring onion",
+      "quantity": "2 stalks",
+      "optional": true,
+      "have": false
+    },
+    {
+      "id": "ing-sesame",
+      "name": "sesame oil",
+      "quantity": "1 tsp",
+      "optional": true,
+      "have": false
+    },
+    {
+      "id": "ing-salt",
+      "name": "salt",
+      "quantity": "to taste",
+      "optional": false,
+      "have": true
+    },
+    {
+      "id": "ing-oil",
+      "name": "cooking oil",
+      "quantity": "1 tbsp",
+      "optional": false,
+      "have": true
+    }
+  ]
+}
