@@ -63,3 +63,33 @@ def chat_reply(turns):
         messages=[{"role": "system", "content": SYSTEM}, *turns],
     )
     return resp.choices[0].message.content
+
+
+REQUEST_PROMPT = (
+    "Decide if the user's message asks to buy or order groceries or products. Reply with JSON only: "
+    '{"intent": "buy" or "other", "items": [{"name": str, "quantity": int}], "budget": number or null, '
+    '"merchant": str or null, "label": str}. intent is "buy" only for a purchase request. '
+    "'name' is a simple searchable product name. 'quantity' is how many retail packs (default 1). "
+    "'budget' is the amount the user said they want to spend (\"about 30\" -> 30), else null. "
+    "'merchant' is a store the user named, else null. 'label' is a 2-4 word title for the order."
+)
+
+
+def parse_request(text):
+    try:
+        resp = OpenAI().chat.completions.create(
+            model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
+            response_format={"type": "json_object"},
+            messages=[{"role": "system", "content": REQUEST_PROMPT}, {"role": "user", "content": text[:2000]}],
+        )
+        result = json.loads(resp.choices[0].message.content or "{}")
+    except (ValueError, KeyError):
+        result = {}
+    budget = result.get("budget")
+    return {
+        "intent": "buy" if result.get("intent") == "buy" else "other",
+        "items": [i for i in result.get("items") or [] if isinstance(i, dict) and i.get("name")],
+        "budget": budget if isinstance(budget, (int, float)) and budget > 0 else None,
+        "merchant": result.get("merchant") or None,
+        "label": result.get("label") or "",
+    }

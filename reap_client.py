@@ -50,6 +50,9 @@ class ReapClient:
     def get_enrollment(self, enrollment_id):
         return self._request("GET", f"/agentic/enrollments/{enrollment_id}")
 
+    def revoke_enrollment(self, enrollment_id):
+        return self._request("POST", f"/agentic/enrollments/{enrollment_id}/revoke")
+
     def list_enrollments(self, owner_id, owner_type="CLIENT_REFERENCE"):
         params = {"ownerType": owner_type, "ownerId": owner_id, "limit": 20}
         return self._request("GET", "/agentic/enrollments", params=params)
@@ -74,7 +77,7 @@ class ReapClient:
             "pagination": {"limit": limit},
         }
         if merchant_preference:
-            body["merchantPreference"] = merchant_preference
+            body["merchantPreference"] = {"mode": "ONLY", "merchantName": merchant_preference}
         return self._request("POST", "/agentic/products/search", json=body)
 
     def create_quote(self, items, email, shipping_address=None):

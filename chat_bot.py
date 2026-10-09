@@ -15,9 +15,9 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
 
-from planner import place_order, prepare_order, summarize, wait_for_checkout
+from planner import delivery_note, place_order, prepare_order, summarize, wait_for_checkout
 from reap_client import ReapClient, ReapError
-from vision import chat_reply, read_image, read_recipe_text
+from vision import chat_reply, parse_request, read_image, read_recipe_text
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("chat_bot")
@@ -34,7 +34,6 @@ DEFAULT_ENROLLMENT = os.environ.get("REAP_ENROLLMENT_ID", "")
 ENROLLMENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "enrollments.json")
 EMAIL = os.environ["REAP_EMAIL"]
 CUSTOM_RETURN_URL = os.environ.get("REAP_RETURN_URL", "")
-recent_checkouts = {}  # chat_id -> [(merchant, checkout_id)] shown when the user returns from approval
 
 
 def bot_username():
@@ -48,20 +47,26 @@ def return_url(kind):
     return f"https://t.me/{BOT_USERNAME}?start={kind}"
 SHIPPING = json.loads(os.environ.get("REAP_SHIPPING_ADDRESS", "null"))
 SIMULATE = os.environ.get("REAP_SIMULATE") == "1"
+COUNTRY = (SHIPPING or {}).get("country", "US")
+CURRENCY = {"SG": "SGD", "US": "USD"}.get(COUNTRY, "USD")
 
 pending = {}  # chat_id -> prepared order awaiting /approve
 history = {}  # chat_id -> recent conversation turns
 selections = {}  # chat_id -> {dish, items, checked indices} for the ingredient checklist
 budgets = {}  # chat_id -> max order total set with /budget
 awaiting_card = {}  # chat_id -> ingredient selection to price once a card is saved
+awaiting_budget = {}  # chat_id -> ingredient selection waiting for the user's budget
+trim_offers = {}  # chat_id -> {sel, drop names} suggested to bring an order under budget
 
 
 def _load_state():
     if not os.path.exists(ENROLLMENTS_FILE):
-        return {"active": {}, "pending": {}}
+        return {"active": {}, "pending": {}, "checkouts": {}}
     with open(ENROLLMENTS_FILE) as f:
         data = json.load(f)
-    return data if "active" in data else {"active": data, "pending": {}}
+    data = data if "active" in data else {"active": data, "pending": {}}
+    data.setdefault("checkouts", {})
+    return data
 
 
 state = _load_state()  # active: chat_id -> usable card enrollment; pending: chat_id -> enrollment awaiting card entry
@@ -137,11 +142,31 @@ def show_cards(chat_id):
     log.info("[%s] latest enrollment %s status %s", chat_id, enrollment["id"], enrollment["status"])
     action = enrollment.get("nextAction") or {}
     if enrollment["status"] == "REQUIRES_ACTION":
-        return say(chat_id, "Reap hasn't received a completed card yet (status REQUIRES_ACTION). "
-                            "Finish all steps on the card page, including the one-time password. "
-                            "Card pages expire after about 15 minutes; if yours did, send /addcard."
+        state["pending"][str(chat_id)] = enrollment["id"]
+        save_state()
+        threading.Thread(target=track_enrollment, args=(chat_id, enrollment["id"]), daemon=True).start()
+        return say(chat_id, "Reap hasn't confirmed your card yet (status REQUIRES_ACTION), so nothing is saved. "
+                            "I'm still watching and will message you the moment it's confirmed. "
+                            "If the card page asked for a passkey or one-time password, finish that step there; "
+                            "the page expires about 15 minutes after /addcard."
                             + (f"\n{action['url']}" if action.get("url") else ""))
     say(chat_id, f"Card setup is {enrollment['status']}. Send /addcard to try again.")
+
+
+def remove_card(chat_id):
+    """Revoke every active card for this chat on Reap and forget it locally. Revoking is final."""
+    try:
+        for item in client.list_enrollments(str(chat_id)).get("items", []):
+            if item.get("status") == "ACTIVE":
+                client.revoke_enrollment(item["id"])
+                log.info("[%s] revoked enrollment %s", chat_id, item["id"])
+    except ReapError as e:
+        log.warning("[%s] revoke failed: %s", chat_id, e)
+        return say(chat_id, f"Couldn't remove your card with Reap: {e.status}. Try again.")
+    enrollments.pop(str(chat_id), None)
+    state["pending"].pop(str(chat_id), None)
+    save_state()
+    say(chat_id, "Your saved card was removed. Send /addcard to add a new one.")
 
 
 def add_card(chat_id):
@@ -175,6 +200,10 @@ def add_card(chat_id):
 
 
 def track_enrollment(chat_id, enrollment_id, timeout=900, interval=5):
+    with tracking_lock:
+        if enrollment_id in tracking:
+            return
+        tracking.add(enrollment_id)
     deadline = time.time() + timeout
     last = None
     try:
@@ -194,6 +223,9 @@ def track_enrollment(chat_id, enrollment_id, timeout=900, interval=5):
     except Exception:
         log.exception("[%s] enrollment tracking failed", chat_id)
         say(chat_id, "I couldn't confirm your card automatically. Send /cards to check.")
+    finally:
+        with tracking_lock:
+            tracking.discard(enrollment_id)
 
 
 def say(chat_id, text):
@@ -210,26 +242,80 @@ def load_recipe(name):
         return json.load(f)
 
 
-def track(chat_id, merchant, checkout_id):
-    final = wait_for_checkout(client, checkout_id)
-    log.info("[%s] %s checkout %s -> %s", chat_id, merchant, checkout_id, final["status"])
-    if final["status"] == "COMPLETED":
-        say(chat_id, f"{merchant}: order {final['orderId']} placed, charged {final['finalAmount']['amount']}.")
-    else:
-        say(chat_id, f"{merchant}: {final['status']}. Nothing was bought; send the request again to retry.")
+tracking = set()  # checkout ids with a watcher thread running
+tracking_lock = threading.Lock()
+
+
+def finish_checkout(checkout_id):
+    state["checkouts"][checkout_id]["done"] = True
+    save_state()
+
+
+def track(checkout_id, timeout=1800, interval=5, failed_grace=300):
+    """Watch a checkout until the merchant order is placed. A FAILED status gets a grace period because
+    it has been seen to recover to PROCESSING after the user approved."""
+    entry = state["checkouts"][checkout_id]
+    chat_id, merchant = entry["chat"], entry["merchant"]
+    with tracking_lock:
+        if checkout_id in tracking:
+            return
+        tracking.add(checkout_id)
+    try:
+        deadline, last, failed_since = time.time() + timeout, None, None
+        while time.time() < deadline:
+            checkout = client.get_checkout(checkout_id)
+            status = checkout["status"]
+            if status != last:
+                last = status
+                log.info("[%s] %s checkout %s -> %s", chat_id, merchant, checkout_id, status)
+                if status == "PROCESSING":
+                    ref = f" Order reference {checkout['orderId']}." if checkout.get("orderId") else ""
+                    say(chat_id, f"{merchant}: payment approved.{ref} The merchant is placing your order...")
+                elif status == "FAILED":
+                    say(chat_id, f"{merchant}: Reap reported a problem with this payment. "
+                                 "I'll keep watching for a few minutes in case it recovers.")
+            if status == "COMPLETED":
+                finish_checkout(checkout_id)
+                return say(chat_id, f"{merchant}: order {checkout['orderId']} placed, charged "
+                                    f"{checkout['finalAmount']['amount']} {checkout['finalAmount']['currency']}."
+                                    + (f"\nDelivery: {entry['delivery']}" if entry.get("delivery") else ""))
+            if status == "EXPIRED":
+                finish_checkout(checkout_id)
+                return say(chat_id, f"{merchant}: the approval link expired. Nothing was bought; send the request again.")
+            if status == "FAILED":
+                failed_since = failed_since or time.time()
+                if time.time() - failed_since >= failed_grace:
+                    finish_checkout(checkout_id)
+                    return say(chat_id, f"{merchant}: the payment didn't go through. Nothing was bought; send the request again.")
+            else:
+                failed_since = None
+            time.sleep(interval)
+        say(chat_id, f"{merchant}: no final result yet. Open the bot link again after approving to check.")
+    except Exception:
+        log.exception("[%s] tracking checkout %s failed", chat_id, checkout_id)
+        say(chat_id, f"{merchant}: I couldn't read the order status. Open the bot link again to retry.")
+    finally:
+        with tracking_lock:
+            tracking.discard(checkout_id)
 
 
 def show_order_status(chat_id):
-    checkouts = recent_checkouts.get(chat_id)
-    if not checkouts:
+    entries = [(cid, e) for cid, e in state["checkouts"].items() if e["chat"] == chat_id][-3:]
+    if not entries:
         return say(chat_id, "Welcome back. No recent order to check. Send a recipe to start.")
     say(chat_id, "Welcome back. Checking your order...")
-    for merchant, checkout_id in checkouts:
+    for checkout_id, entry in entries:
         checkout = client.get_checkout(checkout_id)
-        if checkout["status"] == "COMPLETED":
-            say(chat_id, f"{merchant}: order {checkout['orderId']} placed, charged {checkout['finalAmount']['amount']}.")
+        if checkout["status"] == "COMPLETED" and not entry.get("done"):
+            threading.Thread(target=track, args=(checkout_id,), daemon=True).start()
+        elif checkout["status"] == "COMPLETED":
+            say(chat_id, f"{entry['merchant']}: order {checkout['orderId']} placed, charged "
+                         f"{checkout['finalAmount']['amount']} {checkout['finalAmount']['currency']}."
+                         + (f"\nDelivery: {entry['delivery']}" if entry.get("delivery") else ""))
         else:
-            say(chat_id, f"{merchant}: {checkout['status']}")
+            say(chat_id, f"{entry['merchant']}: {checkout['status']}")
+            if not entry.get("done"):
+                threading.Thread(target=track, args=(checkout_id,), daemon=True).start()
 
 
 def send_for_approval(chat_id, order):
@@ -237,7 +323,7 @@ def send_for_approval(chat_id, order):
     if not enrollment_id:
         return say(chat_id, "No card on file yet. Send /addcard first.")
     log.info("[%s] placing %d checkout(s), total %.2f", chat_id, len(order["quotes"]), order["total"])
-    recent_checkouts[chat_id] = []
+    deliveries = {q["merchant"]: delivery_note(q["quote"]) for q in order["quotes"]}
     for merchant, checkout in place_order(client, order, enrollment_id, return_url("order"), SIMULATE):
         if isinstance(checkout, str):
             say(chat_id, f"{merchant}: checkout failed: {checkout}")
@@ -245,8 +331,10 @@ def send_for_approval(chat_id, order):
         action = checkout.get("nextAction")
         if action:
             say(chat_id, f"{merchant}: tap to approve payment\n{action['url']}")
-        threading.Thread(target=track, args=(chat_id, merchant, checkout["id"]), daemon=True).start()
-        recent_checkouts.setdefault(chat_id, []).append((merchant, checkout["id"]))
+        state["checkouts"][checkout["id"]] = {"chat": chat_id, "merchant": merchant,
+                                              "delivery": deliveries.get(merchant, ""), "done": False}
+        save_state()
+        threading.Thread(target=track, args=(checkout["id"],), daemon=True).start()
 
 
 def handle_photo(chat_id, file_id, caption):
@@ -289,20 +377,112 @@ def checklist_markup(sel):
     return {"inline_keyboard": rows}
 
 
+def start_purchase(chat_id, request):
+    """A plain-language request like 'buy garlic and soy sauce for about 30 from Waangoo'."""
+    merchant = request.get("merchant")
+    items = [{**i, "merchant": merchant} if merchant else i for i in request["items"]]
+    sel = {"dish": request.get("label") or "Your order", "items": items, "checked": set(range(len(items)))}
+    log.info("[%s] buy request: %s, budget=%s, merchant=%s", chat_id,
+             [i["name"] for i in items], request.get("budget"), merchant)
+    say(chat_id, "Got it. Buying: " + ", ".join(f"{i['name']} x{i.get('quantity', 1)}" for i in items)
+                 + (f" from {merchant}" if merchant else ""))
+    awaiting_budget[chat_id] = sel
+    if request.get("budget"):
+        return set_budget_and_continue(chat_id, float(request["budget"]))
+    ask_budget(chat_id)
+
+
+def ask_budget(chat_id):
+    amounts = (20, 40, 60, 100)
+    requests.post(f"{TG}/sendMessage", json={
+        "chat_id": chat_id,
+        "text": f"What's your budget for this order ({CURRENCY})? Tap an amount or type a number, e.g. 45. "
+                "I won't search merchants or charge anything above it.",
+        "reply_markup": {"inline_keyboard": [
+            [{"text": f"{a}", "callback_data": f"b:{a}"} for a in amounts],
+            [{"text": "No limit", "callback_data": "b:none"}, {"text": "Cancel", "callback_data": "decline"}]]}},
+        timeout=30)
+
+
+def set_budget_and_continue(chat_id, budget):
+    sel = awaiting_budget.pop(chat_id, None)
+    if not sel:
+        return say(chat_id, "That list has expired. Send the recipe again.")
+    if budget is None:
+        budgets.pop(chat_id, None)
+        say(chat_id, "No budget limit set.")
+    else:
+        budgets[chat_id] = budget
+        say(chat_id, f"Budget set: {budget:.2f} {CURRENCY}.")
+    if not enrollment_for(chat_id):
+        awaiting_card[chat_id] = sel
+        say(chat_id, "First I need a card. I'll carry on with your selection as soon as it's saved.")
+        return add_card(chat_id)
+    price_selection(chat_id, sel)
+
+
+def offer_trim(chat_id, sel, order, budget):
+    """Over budget: suggest dropping the priciest items until the estimate fits."""
+    excess = order["total"] - budget
+    picks = sorted((p for q in order["quotes"] for p in q["picks"]),
+                   key=lambda p: p["price"] * p["quantity"], reverse=True)
+    drop, saved = [], 0.0
+    for p in picks:
+        if saved >= excess:
+            break
+        drop.append(p)
+        saved += p["price"] * p["quantity"]
+    header = summarize(order) + f"\n\nOver your budget of {budget:.2f} {CURRENCY} by {excess:.2f}. Nothing charged."
+    if saved < excess or len(drop) >= len(picks):
+        selections[chat_id] = sel
+        return say(chat_id, header + "\nI can't get it under budget by dropping items alone. "
+                                     "Untick items on the list above, or raise the budget, and tap Buy selected again.")
+    trim_offers[chat_id] = {"sel": sel, "drop": {p["ingredient"] for p in drop}}
+    listed = "\n".join(f"- {p['ingredient']} ({p['price'] * p['quantity']:.2f})" for p in drop)
+    requests.post(f"{TG}/sendMessage", json={
+        "chat_id": chat_id, "disable_web_page_preview": True,
+        "text": header + f"\n\nTo fit, I can drop the priciest items:\n{listed}",
+        "reply_markup": {"inline_keyboard": [
+            [{"text": "Drop them & re-price", "callback_data": "trim"}],
+            [{"text": "I'll pick items myself", "callback_data": "manual"}, {"text": "Cancel", "callback_data": "decline"}]]}},
+        timeout=30)
+
+
+def accept_trim(chat_id):
+    offer = trim_offers.pop(chat_id, None)
+    if not offer:
+        return say(chat_id, "That offer has expired. Send the recipe again.")
+    sel = offer["sel"]
+    kept = {i for i in sel["checked"] if sel["items"][i]["name"] not in offer["drop"]}
+    say(chat_id, "Dropped: " + ", ".join(sorted(offer["drop"])) + ". Re-pricing the rest...")
+    price_selection(chat_id, {**sel, "checked": kept})
+
+
+def pick_manually(chat_id):
+    offer = trim_offers.pop(chat_id, None)
+    if not offer:
+        return say(chat_id, "That offer has expired. Send the recipe again.")
+    selections[chat_id] = offer["sel"]
+    requests.post(f"{TG}/sendMessage", json={
+        "chat_id": chat_id, "text": checklist_text(offer["sel"]),
+        "reply_markup": checklist_markup(offer["sel"])}, timeout=30)
+
+
 def price_selection(chat_id, sel):
     items = [sel["items"][i] for i in sorted(sel["checked"])]
     say(chat_id, "Searching merchants for your ingredients...")
-    order = prepare_order(client, {"name": sel["dish"], "ingredients": items}, EMAIL, SHIPPING,
+    order = prepare_order(client, {"name": sel["dish"], "ingredients": items}, EMAIL, SHIPPING, COUNTRY, CURRENCY,
                           notify=lambda text: say(chat_id, text))
     log.info("[%s] priced %s: total %.2f, missing %s", chat_id, sel["dish"], order["total"], order["missing"])
     if not order["quotes"]:
         selections[chat_id] = sel  # keep the checklist usable so the user can retry
         return say(chat_id, "I couldn't buy any of the selected ingredients.\n\n" + summarize(order)
+                   + (f"\n\nReap's quote service rejected every merchant. These merchants may not deliver to {COUNTRY}; "
+                      "try a Singapore or US address in REAP_SHIPPING_ADDRESS." if order["failed"] else "")
                    + "\n\nYou can tap Buy selected on the list above to try again.")
     budget = budgets.get(chat_id)
     if budget is not None and order["total"] > budget:
-        return say(chat_id, summarize(order) + f"\n\nOver your budget of {budget:.2f}. Nothing charged. "
-                                              "Send the recipe again with fewer items, or raise it with /budget <amount>.")
+        return offer_trim(chat_id, sel, order, budget)
     present_order(chat_id, order)
 
 
@@ -324,7 +504,7 @@ def approve(chat_id):
 
 
 def cancel(chat_id):
-    for store in (pending, selections, awaiting_card):
+    for store in (pending, selections, awaiting_card, awaiting_budget, trim_offers):
         store.pop(chat_id, None)
     say(chat_id, "Cancelled. Nothing charged.")
 
@@ -337,6 +517,12 @@ def handle_callback(cq):
         return approve(chat_id)
     if data == "decline":
         return cancel(chat_id)
+    if data == "trim":
+        return accept_trim(chat_id)
+    if data == "manual":
+        return pick_manually(chat_id)
+    if data.startswith("b:"):
+        return set_budget_and_continue(chat_id, None if data == "b:none" else float(data[2:]))
     sel = selections.get(chat_id)
     if not sel:
         return say(chat_id, "That list has expired. Send the recipe again.")
@@ -346,11 +532,8 @@ def handle_callback(cq):
         if not sel["checked"]:
             return say(chat_id, "Select at least one ingredient first.")
         selections.pop(chat_id)
-        if not enrollment_for(chat_id):
-            awaiting_card[chat_id] = sel
-            say(chat_id, "First I need a card. I'll carry on with your selection as soon as it's saved.")
-            return add_card(chat_id)
-        return price_selection(chat_id, sel)
+        awaiting_budget[chat_id] = sel
+        return ask_budget(chat_id)
     if data == "all":
         sel["checked"] = set(range(len(sel["items"])))
     elif data == "none":
@@ -362,6 +545,11 @@ def handle_callback(cq):
 
 
 def handle(chat_id, text):
+    if chat_id in awaiting_budget and not text.startswith("/"):
+        try:
+            return set_budget_and_continue(chat_id, float(text.strip().replace(",", "")))
+        except ValueError:
+            return say(chat_id, "Please type a number for your budget, e.g. 45, or tap a button above.")
     cmd, _, arg = text.strip().partition(" ")
     if cmd in ("/start", "/help"):
         if arg.strip() == "card":
@@ -375,11 +563,14 @@ def handle(chat_id, text):
                      "Send a recipe (photo, text or .txt) - tick what you need, then Buy selected\n"
                      "I'll ask for a card if you haven't added one, then continue the order\n"
                      "/cards - check your saved card\n"
+                     "/removecard - delete your saved card\n"
                      "/approve or /cancel - confirm or drop the priced order")
     elif cmd == "/addcard":
         add_card(chat_id)
     elif cmd == "/recipe" and arg.strip():
         handle_recipe_text(chat_id, arg)
+    elif cmd == "/removecard":
+        remove_card(chat_id)
     elif cmd == "/cards":
         show_cards(chat_id)
     elif cmd == "/budget":
@@ -393,7 +584,7 @@ def handle(chat_id, text):
         if not recipe:
             names = ", ".join(f[:-5] for f in os.listdir(RECIPES_DIR) if f.endswith(".json"))
             return say(chat_id, f"Unknown recipe. Try: {names}")
-        order = prepare_order(client, recipe, EMAIL, SHIPPING)
+        order = prepare_order(client, recipe, EMAIL, SHIPPING, COUNTRY, CURRENCY)
         log.info("[%s] priced %s: total %.2f, missing %s", chat_id, arg.strip(), order["total"], order["missing"])
         if not order["quotes"]:
             return say(chat_id, "Couldn't find any of those ingredients.")
@@ -403,6 +594,9 @@ def handle(chat_id, text):
     elif cmd == "/cancel":
         cancel(chat_id)
     else:
+        request = parse_request(text)
+        if request["intent"] == "buy" and request["items"]:
+            return start_purchase(chat_id, request)
         log.info("[%s] chat -> OpenAI", chat_id)
         turns = history.setdefault(chat_id, [])
         turns.append({"role": "user", "content": text})
@@ -427,7 +621,7 @@ def run_autopilot(last_run):
             recipe = load_recipe(so["recipe"])
             if not recipe:
                 continue
-            order = prepare_order(client, recipe, EMAIL, SHIPPING, pantry=so.get("pantry", []))
+            order = prepare_order(client, recipe, EMAIL, SHIPPING, COUNTRY, CURRENCY, pantry=so.get("pantry", []))
             if not order["quotes"]:
                 continue
             if order["total"] > so["budget"]:
@@ -448,6 +642,10 @@ def main():
     for pending_chat, pending_id in list(state["pending"].items()):
         log.info("resuming card setup tracking for chat %s", pending_chat)
         threading.Thread(target=track_enrollment, args=(int(pending_chat), pending_id), daemon=True).start()
+    for checkout_id, entry in list(state["checkouts"].items()):
+        if not entry.get("done"):
+            log.info("resuming checkout tracking %s", checkout_id)
+            threading.Thread(target=track, args=(checkout_id,), daemon=True).start()
     while True:
         chat_id = None
         try:
