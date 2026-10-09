@@ -353,12 +353,14 @@ type ReapCheckout = {
 
 function mapCheckout(raw: ReapCheckout): Checkout {
   const charged = raw.finalAmount ?? raw.amount;
+  const n = charged?.amount;
+  const amount = typeof n === "number" ? n : n != null ? Number(n) : undefined;
   return {
     id: raw.id,
     status: raw.status,
     approvalUrl: raw.nextAction?.url,
     orderId: raw.orderId ?? undefined,
-    finalAmount: charged ? asSgd(charged) : undefined,
+    finalAmount: amount != null && Number.isFinite(amount) ? sgd(amount) : undefined,
   };
 }
 

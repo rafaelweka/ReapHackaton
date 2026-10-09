@@ -20,6 +20,37 @@ const STORE_KEY = "snapdish-session";
 const ENROLL_KEY = "enrollmentId";
 const PENDING_KEY = "pendingApprove";
 const TOKEN_KEY = "enrollToken";
+const CHECKOUT_KEY = "checkoutId";
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchCheckout(id: string): Promise<Checkout> {
+  const res = await fetch(`/api/checkout/${id}?t=${Date.now()}`, { cache: "no-store" });
+  const data = (await res.json()) as Checkout & { error?: string };
+  if (!res.ok) throw new Error(data.error ?? "Checkout lookup failed");
+  return data;
+}
+
+async function pollCheckout(
+  id: string,
+  onTick: (checkout: Checkout) => void,
+  stopped?: () => boolean,
+): Promise<Checkout> {
+  let last: Checkout | null = null;
+  for (let i = 0; i < 45; i++) {
+    if (stopped?.()) break;
+    last = await fetchCheckout(id);
+    onTick(last);
+    if (last.status === "COMPLETED" || last.status === "FAILED" || last.status === "EXPIRED") {
+      return last;
+    }
+    await sleep(2000);
+  }
+  if (!last) throw new Error("Checkout lookup failed");
+  return last;
+}
 
 async function fetchNoStore<T>(url: string): Promise<T> {
   const sep = url.includes("?") ? "&" : "?";
@@ -175,7 +206,7 @@ export default function HomePage() {
     sessionStorage.removeItem(ENROLL_KEY);
     sessionStorage.removeItem(PENDING_KEY);
     sessionStorage.removeItem(TOKEN_KEY);
-    sessionStorage.removeItem("checkoutId");
+    sessionStorage.removeItem(CHECKOUT_KEY);
     setEnrollment(null);
     setCardPageUrl("");
     setResumeAfterCard(false);
@@ -214,7 +245,7 @@ export default function HomePage() {
     return g;
   }, [budget, latestDate, timeWindow, preferred, blocked]);
 
-  const persist = useCallback((next: { recipe?: Recipe | null; plan?: PlanResult | null }) => {
+  const persist = useCallback((next: { recipe?: Recipe | null; plan?: PlanResult | null; checkoutId?: string }) => {
     const payload = {
       recipe: next.recipe ?? recipe,
       plan: next.plan ?? plan,
@@ -223,6 +254,7 @@ export default function HomePage() {
       window: timeWindow,
       preferred,
       blocked,
+      checkoutId: next.checkoutId ?? sessionStorage.getItem(CHECKOUT_KEY) ?? undefined,
     };
     sessionStorage.setItem(STORE_KEY, JSON.stringify(payload));
   }, [recipe, plan, budget, latestDate, timeWindow, preferred, blocked]);
@@ -251,11 +283,11 @@ export default function HomePage() {
       sessionStorage.removeItem(ENROLL_KEY);
       sessionStorage.removeItem(PENDING_KEY);
       sessionStorage.removeItem(TOKEN_KEY);
-      sessionStorage.removeItem("checkoutId");
+      sessionStorage.removeItem(CHECKOUT_KEY);
       window.history.replaceState({}, "", "/");
     }
-    const checkoutId = params.get("checkoutId") ?? sessionStorage.getItem("checkoutId");
     const raw = sessionStorage.getItem(STORE_KEY);
+    let savedCheckoutId = "";
     if (raw) {
       try {
         const saved = JSON.parse(raw) as {
@@ -266,6 +298,7 @@ export default function HomePage() {
           window?: DeliveryWindow;
           preferred?: string;
           blocked?: string;
+          checkoutId?: string;
         };
         if (saved.recipe) setRecipe(saved.recipe);
         if (saved.plan) setPlan(saved.plan);
@@ -274,12 +307,15 @@ export default function HomePage() {
         if (saved.window) setTimeWindow(saved.window);
         if (saved.preferred) setPreferred(saved.preferred);
         if (saved.blocked) setBlocked(saved.blocked);
+        savedCheckoutId = saved.checkoutId ?? "";
         if (saved.plan) setStep("plan");
-        else if (saved.recipe && !checkoutId) setStep("pantry");
+        else if (saved.recipe && !params.get("paid") && !params.get("checkoutId")) setStep("pantry");
       } catch {
         /* ignore */
       }
     }
+    const checkoutId =
+      params.get("checkoutId") ?? sessionStorage.getItem(CHECKOUT_KEY) ?? savedCheckoutId;
 
     const token = params.get("t");
     const eid =
@@ -387,54 +423,35 @@ export default function HomePage() {
       };
     }
 
-    if (params.get("paid") === "1") {
-      const paidId = sessionStorage.getItem("checkoutId");
-      if (paidId) {
-        setStep("confirm");
-        setBusy(true);
-        const load = () =>
-          fetch(`/api/checkout/${paidId}`)
-            .then(async (res) => {
-              const data = await res.json();
-              if (!res.ok) throw new Error(data.error ?? "Checkout lookup failed");
-              setCheckout(data as Checkout);
-              return data as Checkout;
-            });
-        load()
-          .catch((err: unknown) => setError(err instanceof Error ? err.message : "Checkout lookup failed"))
-          .finally(() => setBusy(false));
-        const poll = setInterval(() => {
-          void load().catch(() => undefined);
-        }, 2000);
-        const stop = setTimeout(() => clearInterval(poll), 60000);
-        return () => {
-          clearInterval(poll);
-          clearTimeout(stop);
-        };
-      }
-    }
+    const returningPaid = params.get("paid") === "1" || Boolean(checkoutId);
+    if (!returningPaid) return;
 
-    if (!checkoutId) return;
+    window.history.replaceState({}, "", "/");
     setStep("confirm");
+    if (!checkoutId) {
+      setError("Reap finished, but this tab lost the checkout id. Keep this chat open next time — checkout now stays here while Reap opens in another tab.");
+      return;
+    }
+    sessionStorage.setItem(CHECKOUT_KEY, checkoutId);
     setBusy(true);
-    const load = () =>
-      fetch(`/api/checkout/${checkoutId}`)
-        .then(async (res) => {
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error ?? "Checkout lookup failed");
-          setCheckout(data as Checkout);
-          return data as Checkout;
-        });
-    load()
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Checkout lookup failed"))
-      .finally(() => setBusy(false));
-    const poll = setInterval(() => {
-      void load().catch(() => undefined);
-    }, 2000);
-    const stop = setTimeout(() => clearInterval(poll), 60000);
+    let cancelled = false;
+    void pollCheckout(checkoutId, (data) => {
+      if (!cancelled) setCheckout(data);
+    }, () => cancelled)
+      .then((data) => {
+        if (cancelled) return;
+        if (data.status !== "COMPLETED") {
+          setError(`Checkout is ${data.status}. If Reap said it succeeded, wait a moment or open the Reap tab again.`);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Checkout lookup failed");
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false);
+      });
     return () => {
-      clearInterval(poll);
-      clearTimeout(stop);
+      cancelled = true;
     };
   }, []);
 
@@ -534,7 +551,7 @@ export default function HomePage() {
     }
   }
 
-  async function startCheckout(enrollmentId: string, quoteId: string) {
+  async function startCheckout(enrollmentId: string, quoteId: string, hostedWindow?: Window | null) {
     const res = await fetch("/api/checkout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -543,17 +560,34 @@ export default function HomePage() {
     const data = (await res.json()) as Checkout & { error?: string };
     if (!res.ok) throw new Error(data.error ?? "Checkout failed");
     sessionStorage.removeItem(PENDING_KEY);
-    sessionStorage.setItem("checkoutId", data.id);
+    sessionStorage.setItem(CHECKOUT_KEY, data.id);
+    persist({ recipe, plan, checkoutId: data.id });
+    setCheckout(data);
+    setStep("confirm");
+
     if (data.status === "COMPLETED") {
-      setCheckout(data);
-      setStep("confirm");
+      hostedWindow?.close();
       return;
     }
+
     if (data.approvalUrl) {
-      window.location.href = data.approvalUrl;
+      setCardPageUrl(data.approvalUrl);
+      if (hostedWindow && !hostedWindow.closed) {
+        hostedWindow.location.href = data.approvalUrl;
+      }
+    }
+
+    const final = await pollCheckout(data.id, setCheckout);
+    if (final.status === "COMPLETED") {
+      hostedWindow?.close();
+      setCardPageUrl("");
       return;
     }
-    throw new Error("Checkout did not complete or return an approval URL");
+    throw new Error(
+      final.approvalUrl || data.approvalUrl
+        ? `Checkout is ${final.status}. Finish it in the Reap tab, or tap Open Reap checkout.`
+        : `Checkout is ${final.status} and Reap did not return an approval URL`,
+    );
   }
 
   async function approve() {
@@ -561,6 +595,7 @@ export default function HomePage() {
     setBusy(true);
     setError("");
     persist({ recipe, plan });
+    const hosted = window.open("about:blank", "reap-checkout");
     try {
       const owner = await fetchNoStore<{ active: Enrollment | null }>("/api/enrollment");
       if (owner.active?.status === "ACTIVE") {
@@ -571,16 +606,18 @@ export default function HomePage() {
           enrollmentStatus: owner.active.status,
           detail: { last4: owner.active.last4 },
         });
-        await startCheckout(owner.active.id, plan.quote.id);
+        await startCheckout(owner.active.id, plan.quote.id, hosted);
         return;
       }
+
+      hosted?.close();
 
       const existing = sessionStorage.getItem(ENROLL_KEY);
       if (existing) {
         const current = await fetchNoStore<Enrollment>(`/api/enrollment/${existing}`);
         setEnrollment(current);
         if (current.status === "ACTIVE") {
-          await startCheckout(current.id, plan.quote.id);
+          await startCheckout(current.id, plan.quote.id, window.open("about:blank", "reap-checkout"));
           return;
         }
         if (hostedStepOpen(current)) {
@@ -609,14 +646,16 @@ export default function HomePage() {
         detail: { last4: data.last4 },
       });
       if (data.status === "ACTIVE") {
-        await startCheckout(data.id, plan.quote.id);
+        await startCheckout(data.id, plan.quote.id, window.open("about:blank", "reap-checkout"));
         return;
       }
       if (!data.approvalUrl) throw new Error("Enrollment did not return a card-entry URL");
       setCardPageUrl(data.approvalUrl);
       window.location.href = data.approvalUrl;
     } catch (err) {
+      hosted?.close();
       setError(err instanceof Error ? err.message : "Checkout failed");
+    } finally {
       setBusy(false);
     }
   }
@@ -628,11 +667,12 @@ export default function HomePage() {
     if (checkoutStarted.current) return;
     checkoutStarted.current = true;
     setBusy(true);
-    void startCheckout(enrollment.id, plan.quote.id).catch((err: unknown) => {
-      checkoutStarted.current = false;
-      setError(err instanceof Error ? err.message : "Checkout failed");
-      setBusy(false);
-    });
+    void startCheckout(enrollment.id, plan.quote.id)
+      .catch((err: unknown) => {
+        checkoutStarted.current = false;
+        setError(err instanceof Error ? err.message : "Checkout failed");
+      })
+      .finally(() => setBusy(false));
   }, [resumeAfterCard, enrollment, plan]);
 
   const expired = plan?.quote ? new Date(plan.quote.expiresAt).getTime() <= now : false;
@@ -648,7 +688,7 @@ export default function HomePage() {
   function newOrder() {
     resetLocalCard();
     sessionStorage.removeItem(STORE_KEY);
-    window.location.href = "/";
+    window.location.href = "/?reset=1";
   }
 
   function markHave(id: string) {
@@ -748,7 +788,15 @@ export default function HomePage() {
       else chips.push({ label: "Add sandbox card", onClick: () => void approve() });
     }
   } else if (step === "confirm") {
-    chips.push({ label: "New recipe", icon: I.refresh, onClick: newOrder });
+    if (cardPageUrl && checkout?.status !== "COMPLETED") {
+      chips.push({
+        label: "Open Reap checkout",
+        onClick: () => {
+          window.open(cardPageUrl, "reap-checkout");
+        },
+      });
+    }
+    chips.push({ label: "New recipe", icon: I.refresh, ghost: true, onClick: newOrder });
   }
 
   let agentText = GREETING;
@@ -769,7 +817,10 @@ export default function HomePage() {
   } else if (step === "plan" && plan) {
     agentText = plan.message || `Locked ${plan.merchant.label}. Approve on Reap when you are ready — the agent never sees your card.`;
   } else if (step === "confirm") {
-    agentText = "Approved. You are ready to cook.";
+    agentText =
+      checkout?.status === "COMPLETED"
+        ? "Approved. You are ready to cook."
+        : "Finish checkout in the Reap tab. This chat stays open and will show the receipt when Reap marks it complete.";
   }
 
   const placeholder =
@@ -1008,14 +1059,16 @@ export default function HomePage() {
               <div className="card-head">
                 <div className="card-title">
                   <div className="rtb-hop"><Mascot size={28} /></div>
-                  <span>
-                    <div style={{ fontWeight: 700 }}>Approved</div>
+                  <div>
+                    <div style={{ fontWeight: 700 }}>
+                      {checkout?.status === "COMPLETED" ? "Approved" : "Waiting for Reap"}
+                    </div>
                     <div className="ing-meta">Order {checkout?.orderId ?? checkout?.id ?? "pending"}</div>
-                  </span>
+                  </div>
                 </div>
               </div>
               {recipe ? <div className="ing-meta" style={{ paddingBottom: 6 }}>{recipe.title}</div> : null}
-              {plan?.lines.filter((l) => l.status === "selected").map((l) => (
+              {(plan?.lines ?? []).filter((l) => l.status === "selected" && l.candidate).map((l) => (
                 <div className="line" key={l.ingredientId} style={{ borderColor: "#d3e0d3", fontSize: 13 }}>
                   <span>{l.candidate.name}</span>
                   <span style={{ fontVariantNumeric: "tabular-nums" }}>{formatSgd(l.candidate.price.amount)}</span>
@@ -1023,10 +1076,26 @@ export default function HomePage() {
               ))}
               <div className="line" style={{ borderColor: "#d3e0d3", fontWeight: 600 }}>
                 <span>Total charged</span>
-                <span>{checkout?.finalAmount ? formatSgd(checkout.finalAmount.amount) : quoteTotal || "pending"}</span>
+                <span>
+                  {checkout?.finalAmount
+                    ? formatSgd(checkout.finalAmount.amount)
+                    : quoteTotal || "pending"}
+                </span>
               </div>
               <div className="ing-meta">{checkout?.status ?? "Waiting for Reap checkout…"}</div>
               {enrollment?.last4 ? <div className="ing-meta">Visa •••• {enrollment.last4}</div> : null}
+              {cardPageUrl && checkout?.status !== "COMPLETED" ? (
+                <button
+                  type="button"
+                  className="primary"
+                  style={{ marginTop: 10 }}
+                  onClick={() => {
+                    window.open(cardPageUrl, "reap-checkout");
+                  }}
+                >
+                  Open Reap checkout
+                </button>
+              ) : null}
             </div>
           ) : null}
 

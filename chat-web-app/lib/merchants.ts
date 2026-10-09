@@ -49,5 +49,7 @@ export function sgd(amount: number): { amount: number; currency: "SGD" } {
 }
 
 export function formatSgd(amount: number): string {
-  return `S$${amount.toFixed(2)}`;
+  const n = Number(amount);
+  if (!Number.isFinite(n)) return "S$—";
+  return `S$${n.toFixed(2)}`;
 }
