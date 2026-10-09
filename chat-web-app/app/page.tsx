@@ -163,7 +163,7 @@ const I = {
 };
 
 const GREETING =
-  "What are we cooking? Scan a recipe, paste it, or just name the dish. I will work out what is missing and shop for it within your rules.";
+  "What are we cooking? Snap a plated dish or a written recipe, paste the text, or name the dish. I will work out the ingredients and shop for what is missing.";
 
 export default function HomePage() {
   const [step, setStep] = useState<Step>("input");
@@ -760,7 +760,7 @@ export default function HomePage() {
   if (step === "input") {
     chips.push(
       { label: "Use sample recipe", icon: I.hat, onClick: () => { setLastUser("Use the sample recipe"); void parse({ kind: "sample" }); } },
-      { label: "Scan a recipe", icon: I.camera, ghost: true, onClick: () => photoRef.current?.click() },
+      { label: "Scan a dish or recipe", icon: I.camera, ghost: true, onClick: () => photoRef.current?.click() },
     );
   } else if (step === "pantry") {
     chips.push({ label: "Looks good — set budget", onClick: () => setStep("guardrails") });
@@ -801,9 +801,12 @@ export default function HomePage() {
 
   let agentText = GREETING;
   if (step === "pantry") {
-    agentText = suggested
-      ? "I guessed the ingredients from the dish name. Tap a row if you already have it."
-      : "Tick what is already in the pantry. Unticked items go in the basket.";
+    agentText =
+      recipe?.source === "plated_dish"
+        ? `${recipe.notes || `Looks like ${recipe.title}.`} I filled in a typical home recipe — tap anything you already have.`
+        : suggested
+          ? `${recipe?.notes || "I guessed the ingredients from the dish name."} Tap a row if you already have it.`
+          : "Tick what is already in the pantry. Unticked items go in the basket.";
   } else if (step === "guardrails") {
     agentText = ask === "budget"
       ? "What is the most you want to spend, including delivery? Try “under $25”."
@@ -825,7 +828,7 @@ export default function HomePage() {
 
   const placeholder =
     step === "input"
-      ? "Type a dish or paste a recipe…"
+      ? "Type a dish, paste a recipe, or snap a photo…"
       : ask === "budget"
         ? "e.g. under $25"
         : "Type a reply or a rule…";
@@ -842,7 +845,7 @@ export default function HomePage() {
         onChange={(e) => {
           const file = e.target.files?.[0] ?? null;
           if (file) {
-            setLastUser("Here's a recipe photo");
+            setLastUser("Here's a photo");
             void onPhoto(file);
           }
         }}
@@ -936,6 +939,17 @@ export default function HomePage() {
                   </span>
                 </button>
               ))}
+              {recipe.method && recipe.method.length > 0 ? (
+                <div className="note">
+                  <div style={{ fontWeight: 600, color: "#24372c", marginBottom: 4 }}>How to cook</div>
+                  {recipe.method.map((step, i) => (
+                    <div className="shop-step" key={`${i}-${step.slice(0, 24)}`}>
+                      <span>{i + 1}.</span>
+                      <span>{step}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
           ) : null}
 

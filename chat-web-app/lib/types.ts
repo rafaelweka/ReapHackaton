@@ -9,10 +9,20 @@ export type Ingredient = {
   suggested?: boolean;
 };
 
+export type RecipeSource =
+  | "plated_dish"
+  | "recipe_document"
+  | "typed_dish"
+  | "typed_recipe"
+  | "sample";
+
 export type Recipe = {
   title: string;
   servings: number;
   ingredients: Ingredient[];
+  source?: RecipeSource;
+  notes?: string;
+  method?: string[];
 };
 
 export type Candidate = {
