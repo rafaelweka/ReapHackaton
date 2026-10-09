@@ -7,53 +7,118 @@ from reap_client import ReapError
 FINAL_STATUSES = {"COMPLETED", "FAILED", "EXPIRED"}
 
 
-def pick_product(client, ingredient, country, currency):
-    """Cheapest available product, respecting the ingredient's optional max_price."""
+def confirm_variant(client, pick):
+    """Product detail lookup. Returns (pick | None, note): confirms the default variant is purchasable at its live price."""
+    try:
+        product = client.get_product_details([pick["productId"]])["products"][0]
+    except (ReapError, KeyError, IndexError):
+        return pick, "details unavailable, keeping search price"
+    variant = product.get("defaultVariant")
+    if not variant:
+        return pick, "no default variant, keeping search price"
+    if not variant.get("available"):
+        return None, "out of stock, dropped"
+    live = variant["price"]["amount"]
+    note = "confirmed" if live == pick["price"] else f"confirmed, price changed {pick['price']} -> {live}"
+    return {**pick, "variantId": variant["id"], "price": live}, note
+
+
+def search_ingredient(client, ingredient, country, currency):
+    """Merchant catalog search. Returns (cheapest in-stock match within max_price | None, result count)."""
     result = client.search_products(ingredient["name"], country, currency,
                                     merchant_preference=ingredient.get("merchant"))
+    products = result.get("products", [])
     max_price = ingredient.get("max_price")
-    best = None
-    for product in result.get("products", []):
+    words = ingredient["name"].lower().split()
+    best, best_key = None, None
+    for product in products:
         variant = product.get("previewVariant")
         if not product.get("available") or not variant or not variant.get("available"):
             continue
         price = variant["price"]["amount"]
         if max_price is not None and price > max_price:
             continue
-        if best is None or price < best["price"]:
+        key = (-sum(w in product["name"].lower() for w in words), price)  # best name match, then cheapest
+        if best is None or key < best_key:
+            best_key = key
             best = {
                 "ingredient": ingredient["name"],
                 "product": product["name"],
                 "merchant": product["merchant"]["name"],
+                "productId": product["id"],
                 "variantId": variant["id"],
                 "price": price,
                 "quantity": ingredient.get("quantity", 1),
             }
-    return best
+    return best, len(products)
 
 
-def prepare_order(client, recipe, email, shipping, country="US", currency="USD", pantry=()):
-    """Price the recipe without charging. Ingredients in `pantry` are skipped."""
+def _money(value):
+    return f"{value['amount']:.2f}" if isinstance(value, dict) and "amount" in value else "0.00"
+
+
+def prepare_order(client, recipe, email, shipping, country="US", currency="USD", pantry=(), notify=None):
+    """Price the recipe without charging. `notify(text)` reports each phase as it finishes."""
+    notify = notify or (lambda text: None)
     have = {p.lower() for p in pantry}
-    by_merchant, missing = defaultdict(list), []
-    for ingredient in recipe["ingredients"]:
-        if ingredient["name"].lower() in have:
-            continue
-        pick = pick_product(client, ingredient, country, currency)
-        if pick:
-            by_merchant[pick["merchant"]].append(pick)
-        else:
-            missing.append(ingredient["name"])
+    missing = []
 
-    quotes, total = [], 0.0
+    lines, candidates = [], []
+    for ingredient in recipe["ingredients"]:
+        name = ingredient["name"]
+        if name.lower() in have:
+            continue
+        try:
+            best, count = search_ingredient(client, ingredient, country, currency)
+        except ReapError as e:
+            lines.append(f"- {name}: search failed ({_reason(e)})")
+            missing.append(name)
+            continue
+        if best:
+            candidates.append(best)
+            lines.append(f"- {name}: {count} results, best {best['product']} ({best['merchant']}) {best['price']:.2f}")
+        else:
+            lines.append(f"- {name}: {count} results, none in stock within price cap")
+            missing.append(name)
+    notify("Step 1/3 - Merchant catalog search\n" + "\n".join(lines))
+
+    lines, by_merchant = [], defaultdict(list)
+    for pick in candidates:
+        confirmed, note = confirm_variant(client, pick)
+        lines.append(f"- {pick['product']}: {note}")
+        if confirmed:
+            by_merchant[confirmed["merchant"]].append(confirmed)
+        else:
+            missing.append(pick["ingredient"])
+    if lines:
+        notify("Step 2/3 - Product details\n" + "\n".join(lines))
+
+    lines, quotes, failed, total = [], [], [], 0.0
     for merchant, picks in by_merchant.items():
         items = [{"variantId": p["variantId"], "quantity": p["quantity"]} for p in picks]
-        quote = client.create_quote(items, email, shipping)
-        amount = quote["amountBreakdown"]["finalAmount"]["amount"]
+        try:
+            quote = client.create_quote(items, email, shipping)
+        except ReapError as e:
+            failed.append(f"{merchant}: {_reason(e)}")
+            lines.append(f"- {merchant}: quote failed ({_reason(e)})")
+            continue
+        b = quote["amountBreakdown"]
+        amount = b["finalAmount"]["amount"]
         total += amount
         quotes.append({"merchant": merchant, "picks": picks, "quote": quote, "amount": amount})
-    return {"recipe": recipe["name"], "quotes": quotes, "missing": missing,
+        tax = (b.get("tax") or {}).get("amount")
+        lines.append(f"- {merchant}: items {_money(b.get('itemsSubtotal'))} + shipping {_money(b.get('shipping'))} "
+                     f"+ tax {_money(tax)} = {amount:.2f} {currency}")
+    if lines:
+        notify("Step 3/3 - Live pricing (merchant quotes)\n" + "\n".join(lines))
+    return {"recipe": recipe["name"], "quotes": quotes, "missing": missing, "failed": failed,
             "total": total, "currency": currency}
+
+
+def _reason(error):
+    err = error.body.get("error", {}) if isinstance(error.body, dict) else {}
+    detail = err.get("detail") or {}
+    return detail.get("message") or err.get("message") or str(error)
 
 
 def place_order(client, order, enrollment_id, return_url, simulate=False):
@@ -87,4 +152,6 @@ def summarize(order):
         lines += [f"  - {p['ingredient']}: {p['product']} x{p['quantity']}" for p in q["picks"]]
     if order["missing"]:
         lines.append(f"\nNot found / over price cap: {', '.join(order['missing'])}")
+    if order.get("failed"):
+        lines.append("\nCouldn't quote: " + "; ".join(order["failed"]))
     return "\n".join(lines)
